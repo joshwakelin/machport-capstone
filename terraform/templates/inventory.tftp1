@@ -1,0 +1,22 @@
+[linux] 
+%{ for name in linux ~} 
+${lines[name]} 
+%{ endfor ~} 
+ 
+[windows] 
+%{ for name in windows ~} 
+${lines[name]} 
+%{ endfor ~} 
+ 
+[routers] 
+%{ for name in routers ~} 
+${name} 
+%{ endfor ~} 
+ 
+[linux:vars] 
+ansible_user=ubuntu 
+ 
+[windows:vars] 
+ansible_user=Administrator 
+ansible_shell_type=powershell 
+ansible_pipelining=false 

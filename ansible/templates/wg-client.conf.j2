@@ -1,0 +1,9 @@
+[Interface]
+PrivateKey = {{ lookup('ansible.builtin.file', wg_host_key_file) }}
+Address = {{ wg_host_machine_ip }}/32
+
+[Peer]
+PublicKey = {{ wg_server_public_key }}
+Endpoint = {{ ansible_host }}:51820
+AllowedIPs = {{ vpn_sites | dict2items | map(attribute='value.networks') | flatten | join(', ') }}
+PersistentKeepalive = 25

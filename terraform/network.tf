@@ -56,6 +56,14 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.igw[each.key].id
   }
 
+  dynamic "route" {
+    for_each = contains(keys(local.active_routers), each.key) ? local.remote_cidrs[each.key] : []
+    content {
+      cidr_block           = route.value
+      network_interface_id = aws_instance.server[local.active_routers[each.key]].primary_network_interface_id
+    }
+  }
+
   tags = { Name = "${each.key}-public" }
 }
 

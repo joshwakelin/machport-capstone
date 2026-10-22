@@ -1,0 +1,261 @@
+---
+- name: Active Directory, DNS and certificate services on dc01
+  hosts: windows
+  gather_facts: false
+  vars:
+    ansible_become_method: runas
+    ansible_become_user: Administrator
+    ansible_become_password: "{{ vault_admin_password }}"
+    staff_ou: "OU=Staff,OU=Machport,{{ ad_base_dn }}"
+    groups_ou: "OU=Groups,OU=Machport,{{ ad_base_dn }}"
+    service_ou: "OU=Service Accounts,OU=Machport,{{ ad_base_dn }}"
+  tasks:
+    - name: Check whether dc01 is already a domain controller
+      ansible.windows.win_shell: (Get-CimInstance Win32_ComputerSystem).DomainRole
+      register: domain_role
+      changed_when: false
+
+    - name: Set the Administrator password from Ansible Vault
+      ansible.windows.win_user:
+        name: Administrator
+        password: "{{ vault_admin_password }}"
+        update_password: always
+      when: domain_role.stdout | trim | int < 4
+      no_log: true
+
+    - name: Remove AD CS until the domain exists
+      ansible.windows.win_feature:
+        name: ADCS-Cert-Authority
+        state: absent
+      register: adcs_removed
+      when: domain_role.stdout | trim | int < 4
+
+    - name: Install AD DS and DNS
+      ansible.windows.win_feature:
+        name:
+          - AD-Domain-Services
+          - DNS
+        include_management_tools: true
+      register: features
+
+    - name: Reboot if a feature asked for it
+      ansible.windows.win_reboot:
+      when: features.reboot_required or (adcs_removed.reboot_required | default(false))
+
+    - name: Create the forest {{ ad_domain }}
+      microsoft.ad.domain:
+        dns_domain_name: "{{ ad_domain }}"
+        domain_netbios_name: "{{ ad_netbios }}"
+        safe_mode_password: "{{ vault_dsrm_password }}"
+        install_dns: true
+        reboot: true
+        reboot_timeout: 1800
+      become: true
+
+    - name: Wait until Active Directory answers
+      ansible.windows.win_shell: (Get-ADDomain).DNSRoot
+      become: true
+      register: ad_ready
+      until: ad_ready is succeeded
+      retries: 30
+      delay: 20
+      changed_when: false
+
+    - name: Install AD CS
+      ansible.windows.win_feature:
+        name: ADCS-Cert-Authority
+        include_management_tools: true
+      register: adcs_feature
+
+    - name: Reboot if AD CS asked for it
+      ansible.windows.win_reboot:
+      when: adcs_feature.reboot_required
+
+    - name: Point dc01's own DNS at itself
+      ansible.windows.win_dns_client:
+        adapter_names: "*"
+        dns_servers: [127.0.0.1]
+
+    - name: Send all other DNS lookups to the AWS resolver
+      ansible.windows.win_shell: |
+        $current = @((Get-DnsServerForwarder).IPAddress | ForEach-Object { $_.IPAddressToString })
+        if ($current -notcontains '169.254.169.253') {
+          Set-DnsServerForwarder -IPAddress 169.254.169.253
+          'changed'
+        }
+      become: true
+      register: forwarder
+      changed_when: "'changed' in forwarder.stdout"
+
+    - name: Create the Machport OU
+      microsoft.ad.ou:
+        name: Machport
+        path: "{{ ad_base_dn }}"
+      become: true
+
+    - name: Create the OUs inside it
+      microsoft.ad.ou:
+        name: "{{ item }}"
+        path: "OU=Machport,{{ ad_base_dn }}"
+      loop: [Staff, Groups, Service Accounts]
+      become: true
+
+    - name: Create the security groups
+      microsoft.ad.group:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        scope: global
+        category: security
+        path: "{{ groups_ou }}"
+      loop: "{{ ad_groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      become: true
+
+    - name: Create the staff accounts with their phone numbers
+      microsoft.ad.user:
+        name: "{{ item.first }} {{ item.last }}"
+        sam_account_name: "{{ item.sam }}"
+        upn: "{{ item.sam }}@{{ ad_domain }}"
+        firstname: "{{ item.first }}"
+        surname: "{{ item.last }}"
+        display_name: "{{ item.first }} {{ item.last }}"
+        description: "{{ item.title }}"
+        path: "{{ staff_ou }}"
+        password: "{{ vault_user_password }}"
+        update_password: on_create
+        password_never_expires: true
+        enabled: true
+        attributes:
+          set: >-
+            {{ {'title': item.title, 'telephoneNumber': item.phone, 'ipPhone': item.ext}
+               | combine({'mobile': item.mobile} if item.mobile is defined else {}) }}
+        groups:
+          set: "{{ item.groups }}"
+      loop: "{{ ad_users }}"
+      loop_control:
+        label: "{{ item.sam }}"
+      become: true
+
+    - name: Create the read-only LDAPS account pbx01 uses
+      microsoft.ad.user:
+        name: svc-ldap
+        sam_account_name: svc-ldap
+        upn: "svc-ldap@{{ ad_domain }}"
+        description: Read-only LDAPS account for PBX provisioning (Goal 3)
+        path: "{{ service_ou }}"
+        password: "{{ vault_svc_ldap_password }}"
+        update_password: when_changed
+        password_never_expires: true
+        user_cannot_change_password: true
+        enabled: true
+      become: true
+
+    - name: Install the Machport Root CA
+      ansible.windows.win_shell: |
+        if (Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' -ErrorAction SilentlyContinue) { exit 0 }
+        Install-AdcsCertificationAuthority -CAType EnterpriseRootCA -CACommonName '{{ ad_ca_name }}' -KeyLength 4096 -HashAlgorithmName SHA256 -ValidityPeriod Years -ValidityPeriodUnits 10 -Force | Out-Null
+        'changed'
+      become: true
+      register: ca
+      changed_when: "'changed' in ca.stdout"
+
+    - name: Wait for dc01's own certificate from the CA
+      ansible.windows.win_shell: |
+        certutil -pulse | Out-Null
+        $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+          $_.Issuer -like 'CN={{ ad_ca_name }}*' -and $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.1'
+        }
+        if (-not $cert) { throw 'No server certificate yet' }
+        $cert[0].Subject
+      become: true
+      register: dc_cert
+      until: dc_cert is succeeded
+      retries: 20
+      delay: 15
+      changed_when: false
+
+    - name: Check LDAPS answers with that certificate
+      ansible.windows.win_shell: |
+        $rootDse = [ADSI]'LDAP://localhost/RootDSE'
+        $rootDse.Put('renewServerCertificate', 1)
+        $rootDse.SetInfo()
+        $tcp = New-Object Net.Sockets.TcpClient('localhost', 636)
+        $tls = New-Object Net.Security.SslStream($tcp.GetStream(), $false, { $true })
+        $tls.AuthenticateAsClient('{{ dc_fqdn }}')
+        $tls.RemoteCertificate.Subject
+        $tcp.Close()
+      become: true
+      register: ldaps
+      until: ldaps is succeeded
+      retries: 10
+      delay: 15
+      changed_when: false
+
+    - name: Export the CA certificate for the Linux servers
+      ansible.windows.win_shell: |
+        $ca = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like 'CN={{ ad_ca_name }}*' } | Select-Object -First 1
+        $pem = @('-----BEGIN CERTIFICATE-----', [Convert]::ToBase64String($ca.RawData, 'InsertLineBreaks'), '-----END CERTIFICATE-----')
+        $pem | Set-Content -Path C:\Windows\Temp\machport-root-ca.crt -Encoding ascii
+      changed_when: false
+
+    - name: Copy the CA certificate to the host machine
+      ansible.builtin.fetch:
+        src: C:\Windows\Temp\machport-root-ca.crt
+        dest: "{{ playbook_dir }}/files/machport-root-ca.crt"
+        flat: true
+
+- name: Linux servers trust the Machport CA and can find dc01
+  hosts: linux
+  become: true
+  tasks:
+    - name: Office servers only
+      when: site in ['hq', 'branch']
+      block:
+        - name: Trust the Machport Root CA
+          ansible.builtin.copy:
+            src: files/machport-root-ca.crt
+            dest: /usr/local/share/ca-certificates/machport-root-ca.crt
+            mode: "0644"
+          when: (playbook_dir ~ '/files/machport-root-ca.crt') is file
+          notify: Update CA certificates
+
+        - name: Resolve dc01's domain name
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ dc_fqdn | regex_escape }}(\s|$)'
+            line: "{{ dc_ip }} {{ dc_fqdn }} dc01"
+
+  handlers:
+    - name: Update CA certificates
+      ansible.builtin.command: update-ca-certificates
+      changed_when: true
+
+- name: pbx01 can read Active Directory over LDAPS
+  hosts: pbx01
+  become: true
+  tasks:
+    - name: Install the LDAP tools
+      ansible.builtin.apt:
+        name: ldap-utils
+        state: present
+        lock_timeout: 300
+
+    - name: Create the folder for Machport secrets
+      ansible.builtin.file:
+        path: /etc/machport
+        state: directory
+        mode: "0700"
+
+    - name: Store the svc-ldap password
+      ansible.builtin.copy:
+        dest: /etc/machport/ldap.secret
+        content: "{{ vault_svc_ldap_password }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Install the ad-lookup test command
+      ansible.builtin.template:
+        src: templates/ad-lookup.sh.j2
+        dest: /usr/local/bin/ad-lookup
+        mode: "0755"

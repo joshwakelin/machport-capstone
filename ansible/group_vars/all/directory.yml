@@ -1,0 +1,61 @@
+ad_domain: corp.machport.test
+ad_netbios: CORP
+ad_base_dn: DC=corp,DC=machport,DC=test
+dc_ip: 10.10.20.10
+dc_fqdn: dc01.corp.machport.test
+ad_ca_name: Machport Root CA
+
+ad_groups:
+  - { name: Voice-Users, description: Has a phone account on pbx01 }
+  - { name: Voice-LongDistance, description: May dial long distance in Canada and the US }
+  - { name: Voice-International, description: May dial international numbers }
+  - { name: Executives, description: Impersonating these numbers raises a critical alert }
+  - { name: Remote-Access, description: May connect with WireGuard }
+
+ad_users:
+  - sam: it.helpdesk
+    first: IT
+    last: Help Desk
+    title: IT Help Desk (shared desk line)
+    phone: "+15195550100"
+    ext: "100"
+    groups: [Voice-Users]
+  - sam: achen
+    first: Avery
+    last: Chen
+    title: Chief Executive Officer
+    phone: "+15195550101"
+    ext: "101"
+    mobile: "+15195550181"
+    groups: [Voice-Users, Voice-LongDistance, Voice-International, Executives, Remote-Access]
+  - sam: jpatel
+    first: Jordan
+    last: Patel
+    title: Chief Financial Officer
+    phone: "+15195550102"
+    ext: "102"
+    mobile: "+15195550182"
+    groups: [Voice-Users, Voice-LongDistance, Executives, Remote-Access]
+  - sam: tbrooks
+    first: Taylor
+    last: Brooks
+    title: Accounts Payable
+    phone: "+15195550110"
+    ext: "110"
+    groups: [Voice-Users, Voice-LongDistance]
+  - sam: rkim
+    first: Riley
+    last: Kim
+    title: Dispatcher (works from home)
+    phone: "+15195550120"
+    ext: "120"
+    mobile: "+15195550190"
+    groups: [Voice-Users, Remote-Access]
+  - sam: mlee
+    first: Morgan
+    last: Lee
+    title: Branch Manager, Surrey
+    phone: "+16045550201"
+    ext: "201"
+    mobile: "+16045550281"
+    groups: [Voice-Users, Voice-LongDistance]

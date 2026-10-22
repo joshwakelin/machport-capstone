@@ -1,3 +1,8 @@
+# ------------------------------------------------------------------
+# One row per server (matches the network diagram)
+#   access = "public"   -> SSH straight in from the host machine
+#   access = "internal" -> SSH by jumping through the VPC's router
+# ------------------------------------------------------------------
 locals {
   servers = {
     edge01         = { subnet = "hq-dmz", ip = "10.10.10.10", type = "t3.micro", os = "ubuntu", access = "public", eip = true }
@@ -12,16 +17,17 @@ locals {
     world01        = { subnet = "pstn-public", ip = "10.99.1.20", type = "t3.small", os = "ubuntu", access = "public", eip = true }
   }
 
-  # Servers in the active sites, each tagged with its VPC 
+  # Servers in the active sites, each tagged with its VPC
   active_servers = {
     for k, v in local.servers : k => merge(v, { vpc = local.subnets[v.subnet].vpc })
     if contains(var.sites, local.subnets[v.subnet].vpc)
   }
 }
 
+# Latest Ubuntu 24.04 and Windows Server 2025 images
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical 
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
@@ -52,9 +58,12 @@ resource "aws_instance" "server" {
   subnet_id              = aws_subnet.subnet[each.value.subnet].id
   private_ip             = each.value.ip
   key_name               = aws_key_pair.machport.key_name
-  vpc_security_group_ids = [each.value.access == "public" ? aws_security_group.public[each.value.vpc].id : aws_security_group.internal[each.value.vpc].id]
+  vpc_security_group_ids = concat([each.value.access == "public" ? aws_security_group.public[each.value.vpc].id : aws_security_group.internal[each.value.vpc].id], local.extra_security_groups[each.key])
 
+  # Routers forward other servers' traffic, so AWS must not drop it
   source_dest_check = !contains(values(local.routers), each.key)
+
+  # Windows only: turn on SSH at first boot so Ansible can manage it
   user_data = each.value.os == "windows" ? templatefile("${path.module}/userdata/windows.ps1.tftpl", {
     public_key = trimspace(file(pathexpand(var.public_key_path)))
   }) : null
@@ -65,6 +74,7 @@ resource "aws_instance" "server" {
     encrypted   = true
   }
 
+  # T3 servers: never pay extra for CPU bursts
   dynamic "credit_specification" {
     for_each = startswith(each.value.type, "t3") ? [1] : []
     content {
@@ -72,6 +82,7 @@ resource "aws_instance" "server" {
     }
   }
 
+  # Require IMDSv2, which blocks a common credential-theft trick
   metadata_options {
     http_tokens = "required"
   }
@@ -79,10 +90,13 @@ resource "aws_instance" "server" {
   tags = { Name = each.key, Site = each.value.vpc }
 
   lifecycle {
+    # New Ubuntu and Windows images come out often. Don't rebuild
+    # existing servers just because a newer image exists.
     ignore_changes = [ami, user_data]
   }
 }
 
+# Fixed public IPs that survive stopping and starting the servers
 resource "aws_eip" "public" {
   for_each = { for k, v in local.active_servers : k => v if v.eip }
   domain   = "vpc"

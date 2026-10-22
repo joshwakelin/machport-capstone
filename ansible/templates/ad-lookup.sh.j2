@@ -1,0 +1,3 @@
+#!/bin/sh
+BASE="OU=Staff,OU=Machport,{{ ad_base_dn }}"
+exec ldapsearch -LLL -H ldaps://{{ dc_fqdn }} -D "svc-ldap@{{ ad_domain }}" -y /etc/machport/ldap.secret -b "$BASE" "(objectClass=user)" sAMAccountName displayName title telephoneNumber ipPhone mobile memberOf "$@"

@@ -1,0 +1,214 @@
+---
+- name: Site-to-site VPN between the office routers
+  hosts: routers
+  become: true
+  vars:
+    me: "{{ vpn_sites[site] }}"
+    peer: "{{ vpn_sites[me.peer] }}"
+    peer_built: "{{ peer.router in groups['routers'] }}"
+    peer_public_ip: "{{ hostvars[peer.router].ansible_host if peer_built | bool else '' }}"
+  tasks:
+    - name: Install strongSwan (IPsec) and FRR (BGP)
+      ansible.builtin.apt:
+        name:
+          - charon-systemd
+          - strongswan-swanctl
+          - frr
+        state: present
+        update_cache: true
+        lock_timeout: 300
+
+    - name: Define the ipsec0 tunnel interface
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/40-ipsec0.netdev
+        mode: "0644"
+        content: |
+          [NetDev]
+          Name=ipsec0
+          Kind=xfrm
+          MTUBytes=1400
+
+          [Xfrm]
+          InterfaceId={{ vpn_if_id }}
+          Independent=yes
+      notify: Reload networkd
+
+    - name: Give ipsec0 its tunnel address
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/40-ipsec0.network
+        mode: "0644"
+        content: |
+          [Match]
+          Name=ipsec0
+
+          [Network]
+          Address={{ me.tunnel_ip }}/30
+
+          [Link]
+          RequiredForOnline=no
+      notify: Reload networkd
+
+    - name: Stop strongSwan adding its own routes
+      ansible.builtin.copy:
+        dest: /etc/strongswan.d/machport.conf
+        mode: "0644"
+        content: |
+          charon {
+            install_routes = no
+          }
+          charon-systemd {
+            install_routes = no
+          }
+      notify: Restart IPsec
+
+    - name: Write the IPsec tunnel settings
+      ansible.builtin.template:
+        src: templates/swanctl.conf.j2
+        dest: /etc/swanctl/conf.d/machport.conf
+        mode: "0600"
+      when: peer_built | bool
+      notify: Reload IPsec
+
+    - name: Turn on FRR's BGP and static route daemons
+      ansible.builtin.lineinfile:
+        path: /etc/frr/daemons
+        regexp: "^{{ item }}="
+        line: "{{ item }}=yes"
+      loop: [bgpd, staticd]
+      notify: Restart FRR
+
+    - name: Write the BGP settings
+      ansible.builtin.template:
+        src: templates/frr.conf.j2
+        dest: /etc/frr/frr.conf
+        owner: frr
+        group: frr
+        mode: "0640"
+      when: peer_built | bool
+      notify: Restart FRR
+
+    - name: Make FRR wait for the tunnel interface before starting
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/frr.service.d/machport.conf
+        mode: "0644"
+        content: |
+          [Unit]
+          After=systemd-networkd.service strongswan.service
+          Wants=systemd-networkd.service
+
+          [Service]
+          ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip -4 addr show dev ipsec0 | grep -q "inet " && exit 0; sleep 1; done; exit 0'
+      notify:
+        - Reload systemd
+        - Restart FRR
+
+    - name: Start strongSwan and FRR now and at every boot
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: [strongswan, frr]
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Reload networkd
+      ansible.builtin.command: networkctl reload
+      changed_when: true
+
+    - name: Restart IPsec
+      ansible.builtin.service:
+        name: strongswan
+        state: restarted
+
+    - name: Reload IPsec
+      ansible.builtin.command: swanctl --load-all
+      changed_when: true
+
+    - name: Restart FRR
+      ansible.builtin.service:
+        name: frr
+        state: restarted
+
+- name: WireGuard server for remote staff
+  hosts: edge01
+  become: true
+  vars:
+    wg_host_key_file: "{{ lookup('ansible.builtin.env', 'HOME') }}/.wireguard/machport.key"
+  tasks:
+    - name: Install WireGuard
+      ansible.builtin.apt:
+        name: wireguard-tools
+        state: present
+        lock_timeout: 300
+
+    - name: Create edge01's WireGuard private key
+      ansible.builtin.shell: umask 077 && wg genkey > /etc/wireguard/server.key
+      args:
+        creates: /etc/wireguard/server.key
+
+    - name: Read the private key for the config file
+      ansible.builtin.slurp:
+        src: /etc/wireguard/server.key
+      register: wg_key
+      no_log: true
+
+    - name: Work out edge01's public key
+      ansible.builtin.command: wg pubkey
+      args:
+        stdin: "{{ wg_key.content | b64decode | trim }}"
+      register: wg_pub
+      changed_when: false
+      no_log: true
+
+    - name: Build the list of WireGuard users
+      ansible.builtin.set_fact:
+        wg_server_private_key: "{{ wg_key.content | b64decode | trim }}"
+        wg_server_public_key: "{{ wg_pub.stdout }}"
+        wg_peers: >-
+          {{ wg_extra_peers + ([{'name': 'host machine', 'ip': wg_host_machine_ip,
+             'public_key': lookup('ansible.builtin.pipe', 'wg pubkey < ' ~ wg_host_key_file)}]
+             if wg_host_key_file is file else []) }}
+      no_log: true
+
+    - name: Write the WireGuard server config
+      ansible.builtin.template:
+        src: templates/wg0.conf.j2
+        dest: /etc/wireguard/wg0.conf
+        mode: "0600"
+      no_log: true
+      notify: Reload WireGuard
+
+    - name: Start WireGuard now and at every boot
+      ansible.builtin.service:
+        name: wg-quick@wg0
+        state: started
+        enabled: true
+
+    - name: Write the host machine's WireGuard config
+      ansible.builtin.template:
+        src: templates/wg-client.conf.j2
+        dest: "{{ lookup('ansible.builtin.env', 'HOME') }}/.wireguard/machport.conf"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: wg_host_key_file is file
+      no_log: true
+
+  handlers:
+    - name: Reload WireGuard
+      ansible.builtin.service:
+        name: wg-quick@wg0
+        state: reloaded
+
+- name: Network test tools
+  hosts: linux
+  become: true
+  tasks:
+    - name: Install the test tools
+      ansible.builtin.apt:
+        name: "{{ ['traceroute'] + (['nmap'] if inventory_hostname == 'world01' else []) }}"
+        state: present
+        lock_timeout: 300

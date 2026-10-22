@@ -1,0 +1,35 @@
+frr defaults traditional
+hostname {{ inventory_hostname }}
+log syslog informational
+service integrated-vtysh-config
+ip route {{ vpc_cidr }} {{ ansible_facts['default_ipv4']['gateway'] }}
+{% for net in peer.networks %}
+ip prefix-list FROM-PEER seq {{ loop.index * 10 }} permit {{ net }}
+{% endfor %}
+{% for net in me.networks %}
+ip prefix-list TO-PEER seq {{ loop.index * 10 }} permit {{ net }}
+{% endfor %}
+route-map FROM-PEER permit 10
+ match ip address prefix-list FROM-PEER
+exit
+route-map TO-PEER permit 10
+ match ip address prefix-list TO-PEER
+exit
+route-map SET-SRC permit 10
+ set src {{ ansible_facts['default_ipv4']['address'] }}
+exit
+ip protocol bgp route-map SET-SRC
+router bgp {{ me.asn }}
+ bgp router-id {{ me.tunnel_ip }}
+ neighbor {{ peer.tunnel_ip }} remote-as {{ peer.asn }}
+ neighbor {{ peer.tunnel_ip }} description {{ peer.router }} over IPsec
+ neighbor {{ peer.tunnel_ip }} timers 3 9
+ neighbor {{ peer.tunnel_ip }} timers connect 5
+ address-family ipv4 unicast
+{% for net in me.networks %}
+  network {{ net }}
+{% endfor %}
+  neighbor {{ peer.tunnel_ip }} route-map FROM-PEER in
+  neighbor {{ peer.tunnel_ip }} route-map TO-PEER out
+ exit-address-family
+exit

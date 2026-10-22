@@ -1,39 +1,39 @@
 variable "region" {
-  description = "region declaration"
+  description = "AWS region for every resource (the only one the AWS organization allows)"
   type        = string
   default     = "us-east-2"
 }
 
 variable "az" {
-  description = "availability zone declaration"
+  description = "Availability zone for every subnet"
   type        = string
   default     = "us-east-2a"
 }
 
 variable "admin_cidr" {
-  description = "allowed ssh ips"
+  description = "Public IP of the host machine followed by /32. Only this address can SSH in."
   type        = string
 
   validation {
     condition     = can(regex("^\\d+\\.\\d+\\.\\d+\\.\\d+/32$", var.admin_cidr))
-    error_message = "admin_cidr must look like 100.10.10.10/32."
+    error_message = "admin_cidr must look like 203.0.113.25/32."
   }
 }
 
 variable "public_key_path" {
-  description = "path to pub key"
+  description = "SSH public key that every server will trust"
   type        = string
   default     = "~/.ssh/machport.pub"
 }
 
 variable "private_key_path" {
-  description = "path to priv key"
+  description = "Matching private key, used in the Ansible inventory"
   type        = string
   default     = "~/.ssh/machport"
 }
 
 variable "sites" {
-  description = "network build declaration"
+  description = "Which networks to build. Remove one and apply to delete it."
   type        = list(string)
   default     = ["hq", "branch", "pstn"]
 

@@ -1,0 +1,19 @@
+vpn_if_id: 42
+
+vpn_sites:
+  hq:
+    router: edge01
+    asn: 65010
+    tunnel_ip: 10.255.255.1
+    networks: [10.10.0.0/16, 10.30.0.0/24]
+    peer: branch
+  branch:
+    router: branchedge01
+    asn: 65020
+    tunnel_ip: 10.255.255.2
+    networks: [10.20.0.0/16]
+    peer: hq
+
+wg_server_ip: 10.30.0.1
+wg_host_machine_ip: 10.30.0.2
+wg_extra_peers: []

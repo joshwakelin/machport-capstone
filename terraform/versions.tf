@@ -16,6 +16,7 @@ terraform {
 provider "aws" {
   region = var.region
 
+  # Every resource gets this tag, so mp-start, mp-stop and mp-check can find them all.
   default_tags {
     tags = {
       Project = "machport-capstone"

@@ -1,0 +1,123 @@
+ 
+- name: wait for every server to finish booting 
+  hosts: all 
+  gather_facts: false 
+  tasks: 
+    - name: wait until ansible can log in  
+      ansible.builtin.wait_for_connection: 
+        timeout: 900 
+ 
+- name: turn the routers into NAT gateways for their private subnets 
+  hosts: routers 
+  become: true 
+  tasks: 
+    - name: let the router foward other servers traffic 
+      ansible.posix.sysctl: 
+        name: net.ipv4.ip_forward 
+        value: "1" 
+        sysctl_file: /etc/sysctl.d/99-router.conf 
+        reload: true 
+ 
+    - name: install nftables 
+      ansible.builtin.apt: 
+        name: nftables 
+        state: present 
+        update_cache: true 
+        lock_timeout: 300 
+ 
+    - name: write the NAT rules 
+      ansible.builtin.copy: 
+        dest: /etc/nftables.conf 
+        mode: "0755" 
+        validate: nft -c -f %s 
+        content: | 
+          #!/usr/sbin/nft -f 
+          flush ruleset 
+ 
+          table ip nat { 
+            chain postrouting { 
+              type nat hook postrouting priority srcnat; policy accept; 
+              # Private servers reach the internet using this router's public IP. 
+              # Traffic to other 10.x networks (later: the other office and the VPN) is not NATed. 
+              ip saddr {{ vpc_cidr }} ip daddr != 10.0.0.0/8 oifname "{{ ansible_facts['default_ipv4']['interface'] }}" masquerade 
+            } 
+          } 
+      notify: restart nftables 
+ 
+    - name: start nftables now and at every boot 
+      ansible.builtin.service: 
+        name: nftables 
+        state: started 
+        enabled: true 
+ 
+  handlers: 
+    - name: restart nftables 
+      ansible.builtin.service: 
+        name: nftables 
+        state: restarted 
+ 
+- name: base setup for every Linux server 
+  hosts: linux 
+  become: true 
+  tasks: 
+    - name: set the hostname 
+      ansible.builtin.hostname: 
+        name: "{{ inventory_hostname }}" 
+ 
+    - name: stop cloud-init from changing the hostname back at reboot 
+      ansible.builtin.copy: 
+        dest: /etc/cloud/cloud.cfg.d/99-keep-hostname.cfg 
+        content: "preserve_hostname: true\n" 
+        mode: "0644" 
+ 
+    - name: make the hostname resolve locally 
+      ansible.builtin.lineinfile: 
+        path: /etc/hosts 
+        regexp: '^127\.0\.1\.1' 
+        line: "127.0.1.1 {{ inventory_hostname }}" 
+ 
+    - name: install updates 
+      ansible.builtin.apt: 
+        update_cache: true 
+        upgrade: safe 
+        lock_timeout: 300 
+ 
+    - name: install base tools 
+      ansible.builtin.apt: 
+        name: 
+          - chrony 
+          - curl 
+          - dnsutils 
+          - htop 
+          - tcpdump 
+          - vim 
+        state: present 
+        lock_timeout: 300 
+ 
+    - name: sync clock via ats service 
+      ansible.builtin.copy: 
+        dest: /etc/chrony/sources.d/aws.sources 
+        content: "server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4\n" 
+        mode: "0644" 
+      notify: restart chrony 
+ 
+  handlers: 
+    - name: restart chrony 
+      ansible.builtin.service: 
+        name: chrony 
+        state: restarted 
+ 
+- name: base setup for the Windows server 
+  hosts: windows 
+  tasks: 
+    - name: set the hostname 
+      ansible.windows.win_hostname: 
+        name: "{{ inventory_hostname }}" 
+      register: rename 
+ 
+    - name: reboot if the hostname changed 
+      ansible.windows.win_reboot: 
+      when: rename.reboot_required 
+
+- import_playbook: vpn.yml
+- import_playbook: directory.yml

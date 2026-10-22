@@ -1,0 +1,40 @@
+connections {
+  {{ site }}-{{ me.peer }} {
+    version = 2
+    local_addrs = %any
+    remote_addrs = {{ peer_public_ip }}
+    encap = yes
+    proposals = aes256gcm16-prfsha384-ecp384
+    dpd_delay = 10s
+
+    local {
+      auth = psk
+      id = {{ ansible_host }}
+    }
+    remote {
+      auth = psk
+      id = {{ peer_public_ip }}
+    }
+
+    children {
+      site {
+        local_ts = 0.0.0.0/0
+        remote_ts = 0.0.0.0/0
+        if_id_in = {{ vpn_if_id }}
+        if_id_out = {{ vpn_if_id }}
+        esp_proposals = aes256gcm16-ecp384
+        dpd_action = trap
+        start_action = trap
+        close_action = trap
+      }
+    }
+  }
+}
+
+secrets {
+  ike-{{ me.peer }} {
+    id-local = {{ ansible_host }}
+    id-remote = {{ peer_public_ip }}
+    secret = "{{ vault_ipsec_psk }}"
+  }
+}
